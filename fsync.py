@@ -1,4 +1,5 @@
 import os
+import re
 import time
 import datetime
 import socket
@@ -6,6 +7,7 @@ import logging
 import threading
 
 import pysftp
+import click
 from paramiko.util import ClosingContextManager
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
@@ -50,7 +52,8 @@ class MonitorFileEventHandler:
 
     def on_dir_modified(self, event):
         """
-        此时仅为文件夹内产生变化, 不做任何事
+        trigger by file in directory
+        Nothing to do.
         """
 
     def on_dir_moved(self, event):
@@ -66,7 +69,6 @@ class MonitorFileEventHandler:
     def on_file_modified(self, event):
         for _ in range(2):
             try:
-                # self.sftp.remove(event.rel_path)
                 self.sftp.put(
                     event.src_path,
                     event.remote_path,
@@ -136,9 +138,89 @@ if __name__ == "__main__":
     )
     logger.setLevel(logging.INFO)
 
-    with SyncFile("local path", "remote base path", "username", "password", "hostname", 22) as monitor:
+
+@click.group()
+def main():
+    pass
+
+
+@main.command(help="Upload all file from local to remote")
+@click.option('-l', '--local', default=os.getcwd(), help='default os.getcwd()')
+@click.option('-r', '--remote', required=True)
+@click.option('-h', '--host', required=True)
+@click.option('-p', '--port', type=int, default=22)
+@click.option('-u', '--user', required=True)
+@click.option('--password', required=True)
+@click.option('--ignore', multiple=True)
+def upload(local, remote, host, port, user, password, ignore):
+    click.secho(f"Upload all file in ", nl=False)
+    click.secho(local, fg="blue", nl=False)
+    click.secho(" to ", nl=False)
+    click.secho(f"{host}:{remote}", fg="blue")
+
+    cnopts = pysftp.CnOpts()
+    cnopts.hostkeys = None
+    with pysftp.Connection(
+        host=host,
+        port=port,
+        username=user,
+        password=password,
+        cnopts=cnopts
+    ) as sftp:  # pysftp.Connection
+        if not sftp.exists(remote):
+            sftp.makedirs(remote)
+        sftp.chdir(remote)
+
+        def is_ignore(path: str) -> bool:
+            for _ignore in ignore:
+                _ignore = _ignore.replace("\\", "/")
+                if _ignore.startswith("./") or _ignore.startswith("/"):
+                    if path.replace("\\", "/") == os.path.join(local, ignore).replace("\\", "/"):
+                        return True
+                elif re.search("\*\.(.*)", _ignore):
+                    if path.endswith(_ignore.split("*")[1]):
+                        return True
+                else:
+                    if _ignore in path:
+                        return True
+            return False
+
+        for root, directories, files in os.walk(local):
+            root = os.path.relpath(root, local).replace("\\", "/")
+
+            for directory in directories:
+                directory = os.path.join(root, directory).replace("\\", "/")
+
+                if is_ignore(directory):
+                    continue
+
+                if not sftp.exists(directory):
+                    sftp.mkdir(directory)
+
+            for file in files:
+                file = os.path.join(root, file).replace("\\", "/")
+
+                if is_ignore(file):
+                    continue
+
+                sftp.put(os.path.join(local, file), file)
+
+
+@main.command(help="Sync file by watchdog")
+@click.option('-l', '--local', default=os.getcwd(), help='default os.getcwd()')
+@click.option('-r', '--remote', required=True)
+@click.option('-h', '--host', required=True)
+@click.option('-p', '--port', type=int, default=22)
+@click.option('-u', '--user', required=True)
+@click.option('--password', required=True)
+def sync(local, remote, host, port, user, password):
+    with SyncFile(local, remote, user, password, host, port) as monitor:
         try:
             while True:
                 time.sleep(1)
         except KeyboardInterrupt:
             logger.info("server closed.")
+
+
+if __name__ == "__main__":
+    main()
