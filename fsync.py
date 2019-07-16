@@ -17,12 +17,30 @@ logger: logging.Logger = logging.getLogger("sync")
 logging.getLogger("paramiko").setLevel(logging.WARNING)
 
 
+def is_ignore(path: str, ignore: list, local: str) -> bool:
+    path = path.replace("\\", "/")
+
+    for _ignore in ignore:
+        _ignore = _ignore.replace("\\", "/")
+        if _ignore.startswith("./") or _ignore.startswith("/"):
+            if path == os.path.join(local, ignore).replace("\\", "/"):
+                return True
+        elif re.search("\*\.(.*)", _ignore):
+            if path.endswith(_ignore.split("*")[1]):
+                return True
+        else:
+            if _ignore in path:
+                return True
+    return False
+
+
 class MonitorFileEventHandler:
 
-    def __init__(self, localpath, remotepath, create_connection: pysftp.Connection):
+    def __init__(self, localpath, remotepath, ignore: list, create_connection: pysftp.Connection):
         self.localpath = localpath
         self.remotepath = remotepath
         self.create_sftp = create_connection
+        self.ignore = ignore
 
     @property
     def sftp(self) -> pysftp.Connection:
@@ -32,6 +50,9 @@ class MonitorFileEventHandler:
         """
         Dispatches events to the appropriate methods.
         """
+        if is_ignore(event.src_path, self.ignore, self.localpath):
+            return
+
         self.on_any_event(event)
 
         if event.is_directory:
@@ -42,11 +63,14 @@ class MonitorFileEventHandler:
         # return handler(event)
 
     def on_any_event(self, event):
-        event.rel_path = os.path.relpath(event.src_path, self.localpath).replace("\\", "/")
-        event.remote_path = os.path.join(self.remotepath, event.rel_path).replace("\\", "/")
+        event.rel_path = os.path.relpath(
+            event.src_path, self.localpath).replace("\\", "/")
+        event.remote_path = os.path.join(
+            self.remotepath, event.rel_path).replace("\\", "/")
 
         def log(l, r):
-            logger.debug(f"<{event.__class__.__name__} {event.rel_path}> {l} {r}")
+            logger.debug(
+                f"<{event.__class__.__name__} {event.rel_path}> {l} {r}")
         event.callback = log
         logger.info(f"<{event.__class__.__name__}: {event.rel_path}>")
 
@@ -103,7 +127,7 @@ class MonitorFileEventHandler:
 
 
 class SyncFile(ClosingContextManager):
-    def __init__(self, localpath: str, remotepath: str, user: str, passwd: str, host: str, port: int = 22):
+    def __init__(self, localpath: str, remotepath: str, user: str, passwd: str, host: str, ignore: list, port: int = 22):
         cnopts = pysftp.CnOpts()
         cnopts.hostkeys = None
 
@@ -120,6 +144,7 @@ class SyncFile(ClosingContextManager):
         handler = MonitorFileEventHandler(
             localpath,
             remotepath,
+            ignore,
             create_connection
         )
         self.observer = Observer()
@@ -171,27 +196,13 @@ def upload(local, remote, host, port, user, password, ignore):
             sftp.makedirs(remote)
         sftp.chdir(remote)
 
-        def is_ignore(path: str) -> bool:
-            for _ignore in ignore:
-                _ignore = _ignore.replace("\\", "/")
-                if _ignore.startswith("./") or _ignore.startswith("/"):
-                    if path.replace("\\", "/") == os.path.join(local, ignore).replace("\\", "/"):
-                        return True
-                elif re.search("\*\.(.*)", _ignore):
-                    if path.endswith(_ignore.split("*")[1]):
-                        return True
-                else:
-                    if _ignore in path:
-                        return True
-            return False
-
         for root, directories, files in os.walk(local):
             root = os.path.relpath(root, local).replace("\\", "/")
 
             for directory in directories:
                 directory = os.path.join(root, directory).replace("\\", "/")
 
-                if is_ignore(directory):
+                if is_ignore(directory, ignore, local):
                     continue
 
                 if not sftp.exists(directory):
@@ -200,7 +211,7 @@ def upload(local, remote, host, port, user, password, ignore):
             for file in files:
                 file = os.path.join(root, file).replace("\\", "/")
 
-                if is_ignore(file):
+                if is_ignore(file, ignore, local):
                     continue
 
                 sftp.put(os.path.join(local, file), file)
@@ -213,8 +224,9 @@ def upload(local, remote, host, port, user, password, ignore):
 @click.option('-p', '--port', type=int, default=22)
 @click.option('-u', '--user', required=True)
 @click.option('--password', required=True)
-def sync(local, remote, host, port, user, password):
-    with SyncFile(local, remote, user, password, host, port) as monitor:
+@click.option('--ignore', multiple=True)
+def sync(local, remote, host, port, user, password, ignore):
+    with SyncFile(local, remote, user, password, host, ignore, port):
         try:
             while True:
                 time.sleep(1)
